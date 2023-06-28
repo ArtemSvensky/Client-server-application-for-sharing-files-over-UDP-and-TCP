@@ -1,0 +1,300 @@
+
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <WinSock2.h>
+#include <ws2tcpip.h>
+#include <thread>
+
+#pragma comment(lib, "ws2_32.lib")
+
+const int BUFFER_SIZE = 1024;
+
+void HandleClientConnection(SOCKET clientSocket, const std::string& saveDirectory)
+{
+    // Получение имени файла и порта UDP от клиента через TCP соединение
+    char filenameBuffer[BUFFER_SIZE];
+    int udpPort = 0;
+
+    if (recv(clientSocket, filenameBuffer, BUFFER_SIZE, 0) <= 0)
+    {
+        std::cerr << "Failed to receive filename and UDP port from client." << std::endl;
+        return;
+    }
+
+    std::string filename(filenameBuffer);
+    std::cout << "Received filename: " << filename << std::endl;
+
+    if (recv(clientSocket, reinterpret_cast<char*>(&udpPort), sizeof(udpPort), 0) <= 0)
+    {
+        std::cerr << "Failed to receive UDP port from client." << std::endl;
+        return;
+    }
+
+    std::cout << "Received UDP port: " << udpPort << std::endl;
+
+    // Открытие UDP сокета для приема пакетов от клиента
+    SOCKET udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udpSocket == INVALID_SOCKET)
+    {
+        std::cerr << "Failed to create UDP socket." << std::endl;
+        return;
+    }
+
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(udpPort);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(udpSocket, reinterpret_cast<sockaddr*>(&serverAddress), sizeof(serverAddress)) == SOCKET_ERROR)
+    {
+        std::cerr << "Failed to bind UDP socket." << std::endl;
+        closesocket(udpSocket);
+        return;
+    }
+
+    std::ofstream outputFile(saveDirectory + "\\" + filename, std::ios::binary);
+    if (!outputFile)
+    {
+        std::cerr << "Failed to create output file." << std::endl;
+        closesocket(udpSocket);
+        return;
+    }
+
+    // Прием и сохранение UDP пакетов
+    char buffer[BUFFER_SIZE];
+    sockaddr_in clientAddress{};
+    int clientAddressSize = sizeof(clientAddress);
+
+    while (true)
+    {
+        int bytesRead = recvfrom(udpSocket, buffer, BUFFER_SIZE, 0, reinterpret_cast<sockaddr*>(&clientAddress), &clientAddressSize);
+
+        if (bytesRead <= 0)
+        {
+            std::cerr << "Failed to receive UDP packet." << std::endl;
+            break;
+        }
+
+        // Отправка подтверждения о приеме пакета клиенту через TCP соединение
+        if (send(clientSocket, buffer, bytesRead, 0) == SOCKET_ERROR)
+        {
+            std::cerr << "Failed to send UDP packet acknowledgement to client." << std::endl;
+            break;
+        }
+
+        // Запись пакета в файл
+        outputFile.write(buffer, bytesRead);
+    }
+
+    outputFile.close();
+    closesocket(udpSocket);
+}
+
+int main(int argc, char* argv[])
+{
+    if (argc < 4)
+    {
+        std::cerr << "Usage: Server.exe <listen_port> <save_directory> <max_clients>" << std::endl;
+        return 1;
+    }
+
+    int listenPort = std::stoi(argv[1]);
+    std::string saveDirectory(argv[2]);
+    int maxClients = std::stoi(argv[3]);
+
+    if (maxClients <= 0)
+    {
+        std::cerr << "Invalid max_clients value." << std::endl;
+        return 1;
+    }
+
+    // Инициализация Winsock
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        std::cerr << "Failed to initialize Winsock." << std::endl;
+        return 1;
+    }
+
+    // Создание слушающего TCP сокета
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocket == INVALID_SOCKET)
+    {
+        std::cerr << "Failed to create listen socket." << std::endl;
+        WSACleanup();
+        return 1;
+    }
+
+    // Привязка слушающего сокета к адресу и порту
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(listenPort);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(listenSocket, reinterpret_cast<sockaddr*>(&serverAddress), sizeof(serverAddress)) == SOCKET_ERROR)
+    {
+        std::cerr << "Failed to bind listen socket." << std::endl;
+        closesocket(listenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Начало прослушивания входящих соединений
+    if (listen(listenSocket, maxClients) == SOCKET_ERROR)
+    {
+        std::cerr << "Failed to listen on listen socket." << std::endl;
+        closesocket(listenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    std::cout << "Server listening on port " << listenPort << "..." << std::endl;
+
+    while (true)
+    {
+        // Принятие входящего TCP соединения
+        SOCKET clientSocket = accept(listenSocket, nullptr, nullptr);
+        if (clientSocket == INVALID_SOCKET)
+        {
+            std::cerr << "Failed to accept client connection." << std::endl;
+            continue;
+        }
+
+        std::cout << "Accepted client connection." << std::endl;
+
+        // Обработка клиентского соединения в отдельном потоке
+        std::thread clientThread(HandleClientConnection, clientSocket, saveDirectory);
+        clientThread.detach();
+    }
+
+    // Завершение работы сервера
+    closesocket(listenSocket);
+    WSACleanup();
+
+    return 0;
+}
+
+
+
+
+Client
+
+
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <WinSock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+const int BUFFER_SIZE = 1024;
+
+int main(int argc, char* argv[])
+{
+    if (argc < 4)
+    {
+        std::cerr << "Usage: Client.exe <server_ip> <server_port> <filename>" << std::endl;
+        return 1;
+    }
+
+    std::string serverIP(argv[1]);
+    int serverPort = std::stoi(argv[2]);
+    std::string filename(argv[3]);
+
+    // Инициализация Winsock
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        std::cerr << "Failed to initialize Winsock." << std::endl;
+        return 1;
+    }
+
+    // Создание TCP сокета для соединения с сервером
+    SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket == INVALID_SOCKET)
+    {
+        std::cerr << "Failed to create socket." << std::endl;
+        WSACleanup();
+        return 1;
+    }
+
+    // Установка адреса и порта сервера для соединения
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(serverPort);
+
+    if (inet_pton(AF_INET, serverIP.c_str(), &(serverAddress.sin_addr)) <= 0)
+    {
+        std::cerr << "Invalid server IP address." << std::endl;
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Установка соединения с сервером
+    if (connect(clientSocket, reinterpret_cast<sockaddr*>(&serverAddress), sizeof(serverAddress)) == SOCKET_ERROR)
+    {
+        std::cerr << "Failed to connect to server." << std::endl;
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Отправка имени файла и порта UDP серверу через TCP соединение
+    if (send(clientSocket, filename.c_str(), static_cast<int>(filename.length()), 0) == SOCKET_ERROR)
+    {
+        std::cerr << "Failed to send filename to server." << std::endl;
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    int udpPort = 12345; // Предполагаемый порт UDP сервера
+    if (send(clientSocket, reinterpret_cast<const char*>(&udpPort), sizeof(udpPort), 0) == SOCKET_ERROR)
+    {
+        std::cerr << "Failed to send UDP port to server." << std::endl;
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Открытие файла для отправки
+    std::ifstream inputFile(filename, std::ios::binary);
+    if (!inputFile)
+    {
+        std::cerr << "Failed to open input file." << std::endl;
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Отправка содержимого файла через UDP соединение
+    char buffer[BUFFER_SIZE];
+
+    while (!inputFile.eof())
+    {
+        inputFile.read(buffer, BUFFER_SIZE);
+
+        int bytesRead = static_cast<int>(inputFile.gcount());
+        if (sendto(clientSocket, buffer, bytesRead, 0, reinterpret_cast<sockaddr*>(&serverAddress), sizeof(serverAddress)) == SOCKET_ERROR)
+        {
+            std::cerr << "Failed to send data over UDP." << std::endl;
+            closesocket(clientSocket);
+            WSACleanup();
+            return 1;
+        }
+    }
+
+    std::cout << "File sent successfully." << std::endl;
+
+    // Закрытие соединения и освобождение ресурсов
+    inputFile.close();
+    closesocket(clientSocket);
+    WSACleanup();
+
+    return 0;
+}
